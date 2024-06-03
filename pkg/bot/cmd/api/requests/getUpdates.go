@@ -23,5 +23,3 @@ func NewGetUpdatesRequest(offset int, limit int, timeoutInSeconds float64, allow
 		allowedUpdates,
 	}
 }
-
-var GetUpdatesMethod = "getUpdates"
