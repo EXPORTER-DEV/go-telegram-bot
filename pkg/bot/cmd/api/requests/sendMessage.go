@@ -1,6 +1,10 @@
 package requests
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/err"
+)
 
 type ParseMode string
 
@@ -10,11 +14,30 @@ type ReplyParameters struct {
 	MessageId int `json:"message_id"`
 }
 
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	URL          string `json:"url,omitempty"`
+	CallbackData string `json:"callback_data,omitempty"`
+}
+
+type ReplyMarkup struct {
+	InlineKeyboard [][]*InlineKeyboardButton `json:"inline_keyboard,omitempty"`
+}
+
 type SendMessageRequest struct {
 	ChatId          string           `json:"chat_id"`
 	Text            string           `json:"text"`
 	ParseMode       ParseMode        `json:"parse_mode,omitempty"`
 	ReplyParameters *ReplyParameters `json:"reply_parameters,omitempty"`
+	ReplyMarkup     `json:"reply_markup,omitempty"`
+}
+
+func (r *SendMessageRequest) Validate() error {
+	if r.ChatId == "" {
+		return err.NewValidateError("got empty ChatId")
+	}
+
+	return nil
 }
 
 func (req *SendMessageRequest) Serialize() ([]byte, error) {

@@ -47,7 +47,7 @@ func WithLimit(limit int) ConfigBuilder {
 	}
 }
 
-func New(token string, builders ...ConfigBuilder) (api.TelegramAPIInterface, error) {
+func New(token string, builders ...ConfigBuilder) (api.Requester, error) {
 	config := newConfig(token)
 
 	for _, fn := range builders {

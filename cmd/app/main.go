@@ -3,47 +3,80 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
-	"strconv"
+	"path"
+	"runtime"
 	"syscall"
 
+	"github.com/EXPORTER-DEV/go-telegram-bot/internal/handler"
+	"github.com/EXPORTER-DEV/go-telegram-bot/internal/router"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api"
-	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/domain"
+	"github.com/joho/godotenv"
 )
 
-func bootstap() api.TelegramAPIInterface {
-	token := os.Getenv("TOKEN")
-	if token == "" {
-		panic("Got no TOKEN in env")
+var TokenEnvKey = "TOKEN"
+
+func loadConfigToEnvironment() {
+	_, filename, _, ok := runtime.Caller(1)
+
+	if !ok {
+		log.Fatalf("Failed to get working directory")
 	}
 
-	b, err := bot.New(os.Getenv("TOKEN"))
+	log.Print(filename)
+
+	p := path.Join(filename, "../../../", ".env")
+
+	log.Print(p)
+
+	if err := godotenv.Load(p); err != nil {
+		log.Fatalf("Got failed load .env file: %v\n", err)
+	}
+}
+
+func bootstap() api.Requester {
+	token := os.Getenv(TokenEnvKey)
+	if token == "" {
+		log.Fatalf("Got not set: %s key in environment", TokenEnvKey)
+	}
+
+	b, err := bot.New(token)
 
 	if err != nil {
-		fmt.Println("Error: ", err)
+		log.Fatalf("Error while init bot: %v", err)
 	}
 
 	return b
 }
 
-func polling(ctx context.Context, b api.TelegramAPIInterface) {
-	ch := b.Poll(ctx)
+func polling(ctx context.Context, requestor api.Requester) {
+	ch := requestor.Poll(ctx)
+
+	router := router.New()
+
+	handler.RegisterAboutMeHandler(requestor, router)
+	handler.RegisterHomeHandler(requestor, router)
+	handler.RegisterNotFoundHandler(requestor, router)
 
 	for update := range ch {
-		m := domain.NewMessageBuilder(strconv.Itoa(update.Message.Chat.Id), "text")
-		m.WithReplyToMessageId(update.Message.Id)
+		found, err := router.Handle(ctx, update)
 
-		err := b.Reply(ctx, update, "test")
+		if !found {
+			log.Printf("Got not found handler for update: %+v, ignore it\n", update)
+		}
 
 		if err != nil {
-			fmt.Printf("Failed to send message back: %v", err)
+			log.Printf("Error: %+v\n", fmt.Errorf("got error while handling router: %w", err))
 		}
 	}
 }
 
 func main() {
+	loadConfigToEnvironment()
+
 	b := bootstap()
 
 	ctx := context.Background()

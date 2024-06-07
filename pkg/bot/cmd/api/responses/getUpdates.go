@@ -9,10 +9,17 @@ type InlineQuery struct {
 	ChatType string            `json:"chat_type"`
 }
 
+type CallbackQuery struct {
+	Id   string            `json:"id"`
+	From *definitions.User `json:"from"`
+	Data string            `json:"data"`
+}
+
 type Update struct {
-	UpdateId    int                  `json:"update_id"`
-	Message     *definitions.Message `json:"message"`
-	InlineQuery *InlineQuery         `json:"inline_query"`
+	UpdateId      int                  `json:"update_id"`
+	Message       *definitions.Message `json:"message"`
+	InlineQuery   *InlineQuery         `json:"inline_query"`
+	CallbackQuery *CallbackQuery       `json:"callback_query"`
 }
 
 type GetUpdatesResponse struct {

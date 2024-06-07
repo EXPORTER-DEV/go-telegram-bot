@@ -7,13 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"time"
 
-	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/domain"
+	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/domain/builder"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/requests"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/responses"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/client"
@@ -22,13 +23,14 @@ import (
 var ErrInvalidResponse = errors.New("INVALID_TELEGRAM_API_RESPONSE")
 var ErrInvalidArgument = errors.New("INVALID_ARGUMENT")
 
-type TelegramAPIInterface interface {
+type Requester interface {
 	Poll(ctx context.Context) chan *responses.Update
-	SendMessage(ctx context.Context, message *domain.MessageBuilder) error
-	Reply(ctx context.Context, update *responses.Update, text string) error
+	SendMessage(ctx context.Context, message builder.MessageBuilder) error
+	ReplyTo(ctx context.Context, target *responses.Update, text string) error
+	SetDebugMode(debug bool)
 }
 
-type TelegramAPI struct {
+type API struct {
 	token      string
 	offset     int
 	Limit      int
@@ -36,6 +38,7 @@ type TelegramAPI struct {
 	Timeout    time.Duration
 	client     client.Client
 	maxRetries int
+	debug      bool
 }
 
 type method string
@@ -43,7 +46,7 @@ type method string
 var getUpdatesMethod method = "getUpdates"
 var sendMessageMethod method = "sendMessage"
 
-func (api *TelegramAPI) request(ctx context.Context, method method, body io.Reader) (*http.Response, error) {
+func (api *API) request(ctx context.Context, method method, body io.Reader) (*http.Response, error) {
 	// Copy original URL to patch path for current request below:
 	var url url.URL = *api.URL
 
@@ -72,12 +75,12 @@ func (api *TelegramAPI) request(ctx context.Context, method method, body io.Read
 	return response, nil
 }
 
-func (api *TelegramAPI) getUpdates(ctx context.Context, retry int) ([]*responses.Update, error) {
+func (api *API) getUpdates(ctx context.Context, retry int) ([]*responses.Update, error) {
 	req := requests.NewGetUpdatesRequest(
 		api.offset,
 		api.Limit,
 		api.Timeout.Seconds(),
-		[]string{"message"},
+		[]requests.AllowedUpdate{requests.MessageUpdate, requests.CallbackQueryUpdate},
 	)
 
 	serialized, err := req.Serialize()
@@ -92,7 +95,7 @@ func (api *TelegramAPI) getUpdates(ctx context.Context, retry int) ([]*responses
 
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Got panic while getUpdates: %v\n", r)
+			log.Printf("Got panic while getUpdates: %v\n", r)
 		}
 
 		if res != nil {
@@ -103,7 +106,7 @@ func (api *TelegramAPI) getUpdates(ctx context.Context, retry int) ([]*responses
 	if err != nil {
 		if os.IsTimeout(err) && api.maxRetries > retry {
 			retry += 1
-			fmt.Printf("Timeouted, going for retry: %v/%v\n", retry, api.maxRetries)
+			log.Printf("Timeouted, going for retry: %v/%v\n", retry, api.maxRetries)
 			return api.getUpdates(ctx, retry)
 		}
 
@@ -112,13 +115,13 @@ func (api *TelegramAPI) getUpdates(ctx context.Context, retry int) ([]*responses
 
 	decoder := json.NewDecoder(res.Body)
 
-	// DEBUG CODE BLOCK:
-	bodyReader, _ := res.Request.GetBody()
+	if api.debug {
+		bodyReader, _ := res.Request.GetBody()
 
-	requestBody, _ := io.ReadAll(bodyReader)
+		requestBody, _ := io.ReadAll(bodyReader)
 
-	fmt.Printf("Request body: %s\n", requestBody)
-	// DEBUG CODE BLOCK END;
+		log.Printf("Request body: %s\n", requestBody)
+	}
 
 	var response = new(responses.GetUpdatesResponse)
 
@@ -129,29 +132,29 @@ func (api *TelegramAPI) getUpdates(ctx context.Context, retry int) ([]*responses
 	}
 
 	if !response.Ok {
-		fmt.Printf("Got incorrect response from Telegram API: %+v", response)
+		log.Printf("Got incorrect response from Telegram API: %+v", response)
 		return nil, fmt.Errorf("GOT_INCORRECT_RESPONSE: %w", ErrInvalidResponse)
 	}
 
-	fmt.Printf("Response: %+v\n", response)
+	log.Printf("Response: %+v\n", response)
 
 	if len(response.Result) > 0 {
 		// Cause result is in chronic order, so last has the highest updateId:
 		api.offset = response.Result[len(response.Result)-1].UpdateId + 1
-		fmt.Printf("Updated offset: %+v\n", api.offset)
+		log.Printf("Updated offset: %+v\n", api.offset)
 	}
 
 	return response.Result, nil
 }
 
-func (api *TelegramAPI) Poll(ctx context.Context) chan *responses.Update {
+func (api *API) Poll(ctx context.Context) chan *responses.Update {
 	res := make(chan *responses.Update)
 
 	go func() {
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Printf("Canceled polling cause context done\n")
+				log.Printf("Canceled polling cause context done\n")
 				// Probably extra operation, but let it exist here:
 				close(res)
 				return
@@ -159,7 +162,7 @@ func (api *TelegramAPI) Poll(ctx context.Context) chan *responses.Update {
 				updates, err := api.getUpdates(ctx, 0)
 
 				if err != nil {
-					fmt.Printf("Got error: %v\n", err)
+					log.Printf("Got error: %v\n", err)
 				}
 
 				// Block current goroutine here until all updates will be readed by receivers:
@@ -173,7 +176,13 @@ func (api *TelegramAPI) Poll(ctx context.Context) chan *responses.Update {
 	return res
 }
 
-func (api *TelegramAPI) sendMessage(ctx context.Context, req *requests.SendMessageRequest) error {
+func (api *API) sendMessage(ctx context.Context, req *requests.SendMessageRequest) error {
+	if err := req.Validate(); err != nil {
+		log.Printf("Got invalid message: %v, req: %+v", err, req)
+
+		return err
+	}
+
 	serialized, err := req.Serialize()
 
 	if err != nil {
@@ -186,7 +195,7 @@ func (api *TelegramAPI) sendMessage(ctx context.Context, req *requests.SendMessa
 
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Got panic while getUpdates: %v\n", r)
+			log.Printf("Got panic while getUpdates: %v\n", r)
 		}
 
 		if res != nil {
@@ -206,30 +215,36 @@ func (api *TelegramAPI) sendMessage(ctx context.Context, req *requests.SendMessa
 
 	json.Unmarshal(b, r)
 
-	fmt.Printf("Response: %v+", *r)
+	if api.debug {
+		log.Printf("Response: %v+", *r)
+	}
 
 	return nil
 }
 
-func (api *TelegramAPI) SendMessage(ctx context.Context, message *domain.MessageBuilder) error {
+func (api *API) SendMessage(ctx context.Context, message builder.MessageBuilder) error {
 	return api.sendMessage(ctx, message.GetRequest())
 }
 
-func (api *TelegramAPI) Reply(ctx context.Context, update *responses.Update, text string) error {
-	m := domain.NewMessageBuilder(strconv.Itoa(update.Message.Chat.Id), text)
+func (api *API) ReplyTo(ctx context.Context, update *responses.Update, text string) error {
+	m := builder.NewMessageBuilder(strconv.Itoa(update.Message.Chat.Id), text)
 
 	m.WithReplyToMessageId(update.Message.Id)
 
 	return api.sendMessage(ctx, m.GetRequest())
 }
 
-func New(token string, limit int, rawURL string, timeout time.Duration, client client.Client) (*TelegramAPI, error) {
+func (api *API) SetDebugMode(debug bool) {
+	api.debug = debug
+}
+
+func New(token string, limit int, rawURL string, timeout time.Duration, client client.Client) (Requester, error) {
 	url, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
 	}
 
-	return &TelegramAPI{
+	return &API{
 		token:      token,
 		offset:     0,
 		Limit:      limit,
@@ -237,5 +252,6 @@ func New(token string, limit int, rawURL string, timeout time.Duration, client c
 		Timeout:    timeout,
 		client:     client,
 		maxRetries: 5,
+		debug:      false,
 	}, nil
 }
