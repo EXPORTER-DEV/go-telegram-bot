@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,15 +13,17 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/definitions"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/domain/builder"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/requests"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/responses"
 	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/client"
+	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/errors"
 )
 
-var ErrInvalidResponse = errors.New("INVALID_TELEGRAM_API_RESPONSE")
-var ErrInvalidArgument = errors.New("INVALID_ARGUMENT")
+var initialAttempt = 1
 
+//go:generate mockery --name Requester
 type Requester interface {
 	Poll(ctx context.Context) chan *responses.Update
 	SendMessage(ctx context.Context, message builder.MessageBuilder) error
@@ -46,7 +47,28 @@ type method string
 var getUpdatesMethod method = "getUpdates"
 var sendMessageMethod method = "sendMessage"
 
-func (api *API) request(ctx context.Context, method method, body io.Reader) (*http.Response, error) {
+func (api *API) request(
+	ctx context.Context,
+	method method,
+	requester definitions.Requester,
+	retryAttempt int,
+) (*http.Response, error) {
+	// Check validation for requester first:
+	if err := requester.Validate(); err != nil {
+		return nil, err
+	}
+
+	// Serialize request:
+	serialized, err := requester.Serialize()
+
+	// If got error then return it:
+	if err != nil {
+		// TODO
+		return nil, err
+	}
+
+	body := bytes.NewBuffer(serialized)
+
 	// Copy original URL to patch path for current request below:
 	var url url.URL = *api.URL
 
@@ -65,11 +87,17 @@ func (api *API) request(ctx context.Context, method method, body io.Reader) (*ht
 	response, err := api.client.Do(request)
 
 	if err != nil {
+		if os.IsTimeout(err) && api.maxRetries > retryAttempt {
+			retryAttempt += 1
+			log.Printf("Timeouted for request: %+v, going for retry: %d/%d\n", requester, retryAttempt, api.maxRetries)
+			return api.request(ctx, method, requester, retryAttempt)
+		}
+
 		return nil, err
 	}
 
 	if response.StatusCode != 200 {
-		return nil, fmt.Errorf("UNEXPECTED HTTP STATUS: %v", response.StatusCode)
+		return nil, errors.NewErrInvalidResponse(fmt.Sprintf("Got invalid response with status code: %d", response.StatusCode))
 	}
 
 	return response, nil
@@ -83,15 +111,7 @@ func (api *API) getUpdates(ctx context.Context, retry int) ([]*responses.Update,
 		[]requests.AllowedUpdate{requests.MessageUpdate, requests.CallbackQueryUpdate},
 	)
 
-	serialized, err := req.Serialize()
-
-	if err != nil {
-		return nil, fmt.Errorf("SERIALIZE_FAILED: %w", err)
-	}
-
-	buf := bytes.NewBuffer(serialized)
-
-	res, err := api.request(ctx, getUpdatesMethod, buf)
+	res, err := api.request(ctx, getUpdatesMethod, req, initialAttempt)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -133,7 +153,7 @@ func (api *API) getUpdates(ctx context.Context, retry int) ([]*responses.Update,
 
 	if !response.Ok {
 		log.Printf("Got incorrect response from Telegram API: %+v", response)
-		return nil, fmt.Errorf("GOT_INCORRECT_RESPONSE: %w", ErrInvalidResponse)
+		return nil, errors.NewErrInvalidResponse(fmt.Sprintf("Got invalid response: %+v", response))
 	}
 
 	log.Printf("Response: %+v\n", response)
@@ -177,21 +197,7 @@ func (api *API) Poll(ctx context.Context) chan *responses.Update {
 }
 
 func (api *API) sendMessage(ctx context.Context, req *requests.SendMessageRequest) error {
-	if err := req.Validate(); err != nil {
-		log.Printf("Got invalid message: %v, req: %+v", err, req)
-
-		return err
-	}
-
-	serialized, err := req.Serialize()
-
-	if err != nil {
-		return fmt.Errorf("SERIALIZE_FAILED: %w", err)
-	}
-
-	buf := bytes.NewBuffer(serialized)
-
-	res, err := api.request(ctx, sendMessageMethod, buf)
+	res, err := api.request(ctx, sendMessageMethod, req, initialAttempt)
 
 	defer func() {
 		if r := recover(); r != nil {

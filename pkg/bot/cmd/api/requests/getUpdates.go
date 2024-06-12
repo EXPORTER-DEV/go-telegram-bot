@@ -2,6 +2,8 @@ package requests
 
 import (
 	"encoding/json"
+
+	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/definitions"
 )
 
 type GetUpdatesRequest struct {
@@ -20,7 +22,16 @@ func (req *GetUpdatesRequest) Serialize() ([]byte, error) {
 	return json.Marshal(req)
 }
 
-func NewGetUpdatesRequest(offset int, limit int, timeoutInSeconds float64, allowedUpdates []AllowedUpdate) *GetUpdatesRequest {
+func (req *GetUpdatesRequest) Validate() error {
+	return nil
+}
+
+func NewGetUpdatesRequest(
+	offset int,
+	limit int,
+	timeoutInSeconds float64,
+	allowedUpdates []AllowedUpdate,
+) definitions.Requester {
 	return &GetUpdatesRequest{
 		offset,
 		limit,

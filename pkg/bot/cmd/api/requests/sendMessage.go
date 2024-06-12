@@ -3,7 +3,8 @@ package requests
 import (
 	"encoding/json"
 
-	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/err"
+	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/api/definitions"
+	"github.com/EXPORTER-DEV/go-telegram-bot/pkg/bot/cmd/errors"
 )
 
 type ParseMode string
@@ -34,7 +35,7 @@ type SendMessageRequest struct {
 
 func (r *SendMessageRequest) Validate() error {
 	if r.ChatId == "" {
-		return err.NewValidateError("got empty ChatId")
+		return errors.NewErrValidate("got empty ChatId")
 	}
 
 	return nil
@@ -44,7 +45,10 @@ func (req *SendMessageRequest) Serialize() ([]byte, error) {
 	return json.Marshal(req)
 }
 
-func NewSendMessageRequest(chatId string, text string) *SendMessageRequest {
+func NewSendMessageRequest(
+	chatId string,
+	text string,
+) definitions.Requester {
 	return &SendMessageRequest{
 		ChatId: chatId,
 		Text:   text,
